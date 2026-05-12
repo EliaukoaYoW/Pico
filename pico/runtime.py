@@ -1348,5 +1348,3 @@ class Pico:
         return resolved
 
 MiniAgent = Pico
-
-

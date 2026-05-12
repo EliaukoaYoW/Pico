@@ -1,21 +1,20 @@
 import hashlib
 import json
 import locale as locale_module
-from pyexpat import model
 import shutil
 import subprocess
 import tempfile
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
-import memory as memorylib
-from models import FakeModelClient
-from runtime import Pico, SessionStore
-from run_store import RunStore
-from task_state import STOP_REASON_FINAL_ANSWER_RETURNED
-from workspace import WorkspaceContext
+from . import memory as memorylib
+from .models import FakeModelClient
+from .runtime import Pico, SessionStore
+from .run_store import RunStore
+from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED
+from .workspace import WorkspaceContext
 
 BENCHMARK_SCHEMA_VERSION = 1
 DEFAULT_BENCHMARK_PATH = Path("benchmarks/coding_tasks.json")
@@ -245,7 +244,7 @@ def summarize_rows(rows):
             continue
         category = str(row.get("failure_category") or "unknown")
         failure_category_counts[category] = failure_category_counts.get(category, 0) + 1
-    
+
     total_tasks = len(rows)
     within_budget = sum(1 for row in rows if row.get("within_budget"))
     verifier_passes = sum(1 for row in rows if row.get("verifier_passed"))
@@ -399,7 +398,7 @@ class BenchmarkEvaluator:
     def run(self):
         benchmark = self.load()
         rows = [self.run_task(task) for task in benchmark["tasks"]]
-        summary = summarize_rows[rows]
+        summary = summarize_rows(rows)
         artifact = {
             "schema_version": BENCHMARK_SCHEMA_VERSION,
             "captured_at": _now_in_timezone(self.timezone_name),
@@ -575,7 +574,7 @@ def run_fixed_benchmark(
     top_p=DEFAULT_TOP_P,
     max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
     timezone_name=DEFAULT_TIMEZONE,
-    model_client_factory=None
+    model_client_factory=None,
 ):
     evaluator = BenchmarkEvaluator(
         benchmark_path=benchmark_path,
@@ -590,3 +589,29 @@ def run_fixed_benchmark(
         model_client_factory=model_client_factory,
     )
     return evaluator.run()
+
+
+def run_harness_regression_v2(
+    benchmark_path=DEFAULT_BENCHMARK_PATH,
+    artifact_path=DEFAULT_HARNESS_REGRESSION_V2_ARTIFACT_PATH,
+    workspace_root=None,
+    model_name=DEFAULT_MODEL_NAME,
+    model_version=DEFAULT_MODEL_VERSION,
+    temperature=DEFAULT_TEMPERATURE,
+    top_p=DEFAULT_TOP_P,
+    max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
+    timezone_name=DEFAULT_TIMEZONE,
+    model_client_factory=None,
+):
+    return run_fixed_benchmark(
+        benchmark_path=benchmark_path,
+        artifact_path=artifact_path,
+        workspace_root=workspace_root,
+        model_name=model_name,
+        model_version=model_version,
+        temperature=temperature,
+        top_p=top_p,
+        max_new_tokens=max_new_tokens,
+        timezone_name=timezone_name,
+        model_client_factory=model_client_factory,
+    )

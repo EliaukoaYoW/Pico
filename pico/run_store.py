@@ -35,6 +35,7 @@ class RunStore:
     def start_run(self, task_state):
         # 每次 ask() 都会生成一个 run 目录。
         # 这样一次用户请求对应一组独立工件，后续排查更容易。
+        self.root.mkdir(parents=True, exist_ok=True)
         run_dir = self.run_dir(task_state)
         run_dir.mkdir(parents=True, exist_ok=True)
         self.write_task_state(task_state)

@@ -5,8 +5,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from .evaluator import run_fixed_benchmark
-from .models import AnthropicCompatibleModelClient, FakeModelClient, OpenAICompatibleModelClient
+from .evalutor import run_fixed_benchmark
+from .models import FakeModelClient, OpenAICompatibleModelClient, SiliconflowModelClient
 from .runtime import Pico, SessionStore
 from .workspace import WorkspaceContext
 
@@ -15,23 +15,26 @@ DEFAULT_HARNESS_REGRESSION_V2_PATH = Path("artifacts/harness-regression-v2.json"
 DEFAULT_CONTEXT_ABLATION_V2_PATH = Path("artifacts/context-ablation-v2.json")
 DEFAULT_MEMORY_ABLATION_V2_PATH = Path("artifacts/memory-ablation-v2.json")
 DEFAULT_RECOVERY_ABLATION_V2_PATH = Path("artifacts/recovery-ablation-v2.json")
-DEFAULT_CORE_REPORT_PATH = Path("docs/metrics/pico-benchmark-core-report.md")
+DEFAULT_CORE_REPORT_PATH = Path("artifacts/pico-benchmark-core-report.md")
+
 
 
 def _safe_mean(values):
+    """ 安全计算平均值，避免除0错误 """
     values = list(values)
     if not values:
         return 0.0
     return sum(values) / len(values)
 
-
 def _safe_ratio(numerator, denominator):
-    if not denominator:
+    """ 安全计算比率，避免除0错误 """
+    if denominator == 0:
         return 0.0
     return numerator / denominator
 
 
 def _parse_iso8601(value):
+    """ 解析ISO 8601时间字符串 """
     if not value:
         return None
     try:
@@ -39,20 +42,22 @@ def _parse_iso8601(value):
     except Exception:
         return None
 
-
-def aggregate_benchmark_artifact(path):
+def aggregate_benckmark_artfifact(path):
+    """ 聚合基准测试结果 """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     rows = list(payload.get("rows", []))
     summary = dict(payload.get("summary", {}))
     task_count = int(summary.get("total_tasks", len(rows) or 0))
     tool_steps = [int(row.get("tool_steps", 0)) for row in rows]
     attempts = [int(row.get("attempts", 0)) for row in rows]
+
     categories = {}
     for row in rows:
         category = str(row.get("category", "")).strip()
         if not category:
             continue
         categories[category] = categories.get(category, 0) + 1
+
     return {
         "task_count": task_count,
         "passed": int(summary.get("passed", 0)),
@@ -71,15 +76,15 @@ def aggregate_benchmark_artifact(path):
 def _infer_run_duration_ms(events):
     finished = next((event for event in reversed(events) if event.get("event") == "run_finished"), None)
     if finished and finished.get("run_duration_ms") is not None:
-        return float(finished["run_duration_ms"])
+        return float(finished.get("run_duration_ms"))
     started = next((event for event in events if event.get("event") == "run_started"), None)
     if not started or not finished:
         return 0.0
-    start_dt = _parse_iso8601(started.get("created_at"))
-    end_dt = _parse_iso8601(finished.get("created_at"))
-    if start_dt is None or end_dt is None:
+    start_at = _parse_iso8601(started.get("created_at"))
+    end_at = _parse_iso8601(finished.get("created_at"))
+    if not start_at or not end_at:
         return 0.0
-    return max(0.0, (end_dt - start_dt).total_seconds() * 1000.0)
+    return max(0.0, (end_at - start_at).total_seconds() * 1000.0)
 
 
 def aggregate_run_artifacts(runs_root):
@@ -99,30 +104,32 @@ def aggregate_run_artifacts(runs_root):
         trace_path = run_dir / "trace.jsonl"
         if report_path.exists():
             reports.append(json.loads(report_path.read_text(encoding="utf-8")))
+
         events = []
         if trace_path.exists():
             events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
         run_durations.append(_infer_run_duration_ms(events))
         for event in events:
             if event.get("event") == "prompt_built" and event.get("duration_ms") is not None:
                 prompt_durations.append(float(event["duration_ms"]))
             if event.get("event") != "tool_executed":
                 continue
-            tool_name = str(event.get("name", "")).strip()
+            tool_name = str(event.get("name","")).strip()
             if tool_name:
                 tool_name_counts[tool_name] = tool_name_counts.get(tool_name, 0) + 1
-            tool_status = str(event.get("tool_status", "")).strip()
+            tool_status = str(event.get("status","")).strip()
             if tool_status:
-                tool_status_counts[tool_status] = tool_status_counts.get(tool_status, 0) + 1
+                tool_status_counts[tool_status] = tool_status_counts.get(tool_status, 0) + 1    
             security_event = str(event.get("security_event_type", "")).strip()
             if security_event:
                 security_event_counts[security_event] = security_event_counts.get(security_event, 0) + 1
             if event.get("duration_ms") is not None:
                 tool_durations.append(float(event["duration_ms"]))
-
+    
     tool_steps = [int(report.get("tool_steps", 0)) for report in reports]
     attempts = [int(report.get("attempts", 0)) for report in reports]
-    prompt_chars = [int((report.get("prompt_metadata") or {}).get("prompt_chars", 0)) for report in reports]
+    prompt_chars = [int((report.get("prompt_metadata") or {}).get("prompt_chars",0)) for report in reports]
     cached_tokens = [int((report.get("prompt_metadata") or {}).get("cached_tokens", 0) or 0) for report in reports]
     cache_hits = [bool((report.get("prompt_metadata") or {}).get("cache_hit")) for report in reports]
     input_tokens = [int((report.get("prompt_metadata") or {}).get("input_tokens", 0) or 0) for report in reports]
@@ -154,7 +161,6 @@ def aggregate_run_artifacts(runs_root):
         "avg_prompt_build_duration_ms": _safe_mean(prompt_durations),
     }
 
-
 @contextmanager
 def _temporary_feature_flags(agent, updates):
     previous = dict(getattr(agent, "feature_flags", {}))
@@ -166,12 +172,11 @@ def _temporary_feature_flags(agent, updates):
     finally:
         agent.feature_flags = previous
 
-
 def measure_feature_ablation_metrics(agent, user_message):
     variants = {
         "full": {},
         "no_context_reduction": {"context_reduction": False},
-        "no_memory": {"memory": False, "relevant_memory": False},
+        "no_memory": {"memory": False, "relevant_memory": False}
     }
     results = {}
     for name, updates in variants.items():
@@ -183,10 +188,10 @@ def measure_feature_ablation_metrics(agent, user_message):
             "history_chars": int(metadata.get("sections", {}).get("history", {}).get("rendered_chars", 0)),
             "relevant_selected_count": int(metadata.get("relevant_memory", {}).get("selected_count", 0)),
             "budget_reduction_count": len(metadata.get("budget_reductions", [])),
-            "current_request_preserved": prompt.endswith(f"Current user request:\n{user_message}"),
+            # 检查压缩后的 Prompt 是否依然以用户最后的那句“当前请求”结尾的条件出现在程序
+            "current_request_preserved": prompt.endswith(f"Current user request:\n{user_message}")
         }
     return results
-
 
 def build_stress_agent_metrics():
     with tempfile.TemporaryDirectory(prefix="pico-metrics-") as temp_dir:
@@ -200,21 +205,20 @@ def build_stress_agent_metrics():
             session_store=store,
             approval_policy="auto",
         )
-        for index in range(12):
-            agent.memory.append_note(
-                f"stress-note-{index}-" + ("A" * 180),
-                tags=("recall",),
-                created_at=f"2026-04-08T10:{index:02d}:00+00:00",
-            )
-            agent.record(
-                {
-                    "role": "user" if index % 2 == 0 else "assistant",
-                    "content": f"stress-history-{index}-" + ("B" * 220),
-                    "created_at": f"2026-04-08T11:{index:02d}:00+00:00",
-                }
-            )
-        return measure_feature_ablation_metrics(agent, "recall")
-
+    for index in range(12):
+        agent.memory.append_note(
+            f"stress-note-{index}-" + ("A" * 180),
+            tags=("recall",),
+            created_at=f"2026-04-08T10:{index:02d}:00+00:00",
+        )
+        agent.record(
+            {
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": f"stress-history-{index}-" + ("B" * 220),
+                "created_at": f"2026-04-08T11:{index:02d}:00+00:00",
+            }
+        )
+    return measure_feature_ablation_metrics(agent, "recall")
 
 class _MemoryExperimentModelClient(FakeModelClient):
     def __init__(self, expected_fact, filename):
@@ -223,30 +227,40 @@ class _MemoryExperimentModelClient(FakeModelClient):
         self.filename = str(filename).strip()
         self.phase = "bootstrap_tool"
         self.followup_reads = 0
-
+    
     def complete(self, prompt, max_new_tokens, **kwargs):
         del max_new_tokens, kwargs
         self.prompts.append(prompt)
         self.last_completion_metadata = {}
+        # 初始化引导阶段
         if self.phase == "bootstrap_tool":
             self.phase = "bootstrap_final"
             return f'<tool>{{"name":"read_file","args":{{"path":"{self.filename}","start":1,"end":20}}}}</tool>'
+        # 引导完成阶段
         if self.phase == "bootstrap_final":
             self.phase = "question"
             return "<final>Done.</final>"
+        # 核心测试阶段
         if self.phase == "question":
+            # print(f"DEBUG: agent_memory_enabled={getattr(self, 'agent_memory_enabled', 'unknown')}")
             prompt_lower = prompt.lower()
+            # 检查 Prompt 中是否包含 Memory or Relevant Memory 并搜索预期事实是否在其中
             memory_view = ""
             if "memory:" in prompt_lower and "\n\nrelevant memory:" in prompt_lower:
                 memory_view = prompt_lower.split("memory:", 1)[1].split("\n\nrelevant memory:", 1)[0]
+            
             relevant_view = ""
             if "relevant memory:" in prompt_lower and "\n\ntranscript:" in prompt_lower:
                 relevant_view = prompt_lower.split("relevant memory:", 1)[1].split("\n\ntranscript:", 1)[0]
+            
             if self.expected_fact in memory_view or self.expected_fact in relevant_view:
                 return f"<final>{self.expected_fact.capitalize()}.</final>"
+            
+            # 未找到预期事实，说明记忆系统“失忆”了 ==> 此时它会发起第二次 read_file 调用 followup_read + 1
             self.phase = "question_after_read"
             self.followup_reads += 1
             return f'<tool>{{"name":"read_file","args":{{"path":"{self.filename}","start":1,"end":20}}}}</tool>'
+        # 补救阶段
         if self.phase == "question_after_read":
             self.phase = "done"
             return f"<final>{self.expected_fact.capitalize()}.</final>"
@@ -257,12 +271,11 @@ def _build_memory_experiment_agent(workspace_root, expected_fact, filename):
     workspace = WorkspaceContext.build(workspace_root)
     store = SessionStore(workspace_root / ".pico" / "sessions")
     return Pico(
-        model_client=_MemoryExperimentModelClient(expected_fact, filename),
+        model_client = _MemoryExperimentModelClient(expected_fact, filename),
         workspace=workspace,
         session_store=store,
         approval_policy="auto",
     )
-
 
 def _set_irrelevant_memory(agent):
     state = agent.memory.to_dict()
@@ -280,9 +293,9 @@ def _set_irrelevant_memory(agent):
     agent.memory.state = state
     agent.session["memory"] = agent.memory.to_dict()
 
-
+# 基础依赖实验（运行固定的任务: 询问“deploy key 的颜色”）证明任务可跑通
 def _run_memory_variant(mode):
-    with tempfile.TemporaryDirectory(prefix="pico-memory-experiment-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix = "pico-memory-experiment-") as temp_dir:
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         (workspace_root / "facts.txt").write_text("deploy key is red\n", encoding="utf-8")
@@ -294,7 +307,7 @@ def _run_memory_variant(mode):
             agent.feature_flags["relevant_memory"] = False
         elif mode == "memory_irrelevant":
             _set_irrelevant_memory(agent)
-
+        
         result = agent.ask("What color is the deploy key?")
         task_state = agent.current_task_state
         model_client = agent.model_client
@@ -305,7 +318,6 @@ def _run_memory_variant(mode):
             "repeated_reads": int(getattr(model_client, "followup_reads", 0)),
         }
 
-
 def run_memory_dependency_experiment(repetitions=3):
     variants = {
         "memory_on": [],
@@ -315,7 +327,7 @@ def run_memory_dependency_experiment(repetitions=3):
     for _ in range(int(repetitions)):
         for variant in variants:
             variants[variant].append(_run_memory_variant(variant))
-
+    
     results = {}
     for variant, rows in variants.items():
         results[variant] = {
@@ -326,7 +338,7 @@ def run_memory_dependency_experiment(repetitions=3):
         }
     return results
 
-
+# 12 组记忆实验任务
 MEMORY_EXPERIMENT_TASKS = [
     {"id": "fact_color", "category": "fact_lookup", "filename": "facts.txt", "fact": "deploy key is red"},
     {"id": "fact_api", "category": "fact_lookup", "filename": "settings.txt", "fact": "api base path is /v1/internal"},
@@ -346,12 +358,10 @@ MEMORY_EXPERIMENT_TASKS = [
 def _write_memory_task_files(workspace_root, task):
     filename = task["filename"]
     payload = task["fact"]
-    (workspace_root / filename).write_text(payload + "\n", encoding="utf-8")
-
+    (workspace_root / filename).write_text(payload, encoding="utf-8")
 
 def _bootstrap_prompt(task):
     return f"Read {task['filename']} and remember the key fact."
-
 
 def _followup_prompt(task):
     if task["category"] == "fact_lookup":
@@ -359,7 +369,6 @@ def _followup_prompt(task):
     if task["category"] == "edit_dependency":
         return f"Use the remembered constraint from {task['filename']} to continue without rereading."
     return f"What was the conclusion we already established from {task['filename']}?"
-
 
 def _set_irrelevant_memory_for_task(agent):
     state = agent.memory.to_dict()
@@ -373,39 +382,49 @@ def _set_irrelevant_memory_for_task(agent):
         }
     ]
     state["notes"] = ["the team mascot is blue"]
-    state["file_summaries"] = {}
+    state["file_summaries"] = []
     agent.memory.state = state
     agent.session["memory"] = agent.memory.to_dict()
 
-
+# 大规模消融实验（多种不同类型的任务场景）
 def _run_memory_task_variant(task, variant):
     with tempfile.TemporaryDirectory(prefix="pico-memory-large-") as temp_dir:
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         _write_memory_task_files(workspace_root, task)
-        agent = _build_memory_experiment_agent(workspace_root, task["fact"], task["filename"])
-        assert agent.ask(_bootstrap_prompt(task)) == "Done."
-        if variant == "memory_off":
-            agent.feature_flags["memory"] = False
-            agent.feature_flags["relevant_memory"] = False
-        elif variant == "memory_irrelevant":
-            _set_irrelevant_memory_for_task(agent)
-        result = agent.ask(_followup_prompt(task))
-        task_state = agent.current_task_state
-        return {
+    agent = _build_memory_experiment_agent(workspace_root, task["fact"], task["filename"])
+    assert agent.ask(_bootstrap_prompt(task)) == "Done."
+
+    if variant == "memory_off":
+        agent.feature_flags["memory"] = False
+        agent.feature_flags["relevant_memory"] = False
+    elif variant == "memory_irrelevant":
+        _set_irrelevant_memory_for_task(agent)
+        
+    result = agent.ask(_followup_prompt(task))
+    task_state = agent.current_task_state
+    return {
             "correct": result.strip().lower() == f"{task['fact']}.",
             "tool_steps": int(task_state.tool_steps),
             "attempts": int(task_state.attempts),
             "repeated_reads": int(getattr(agent.model_client, "followup_reads", 0)),
         }
 
-
 def run_large_scale_memory_experiment(repetitions=5):
+    """
+    量化评估 Agent 的记忆系统在减少重复劳动和提高准确性方面的表现
+    指标:
+    重复读取次数 (repeated_reads)：统计 Agent 是否因为“记不住”而多次读取同一个文件 => 这是衡量记忆系统价值的关键指标
+    事实准确率 (correct_rate)：在不同记忆状态下，Agent 回答事实性问题的正确比例
+    记忆命中率 (memory_hit_rate)：完全不需要重复读取文件就能完成任务的比例
+    工具步数 (avg_tool_steps)：评估记忆功能是否能显著缩短解决问题的路径
+    重试次数 (avg_attempts)：完成任务所需的平均尝试次数
+    """
     repetitions = int(repetitions)
     variants = {
-        "memory_on": [],
-        "memory_off": [],
-        "memory_irrelevant": [],
+        "memory_on": [],         # 正常开启记忆功能
+        "memory_off": [],        # 关闭记忆功能
+        "memory_irrelevant": [], # 在记忆中注入无关干扰信息
     }
     for task in MEMORY_EXPERIMENT_TASKS:
         for _ in range(repetitions):
@@ -436,6 +455,17 @@ def run_large_scale_memory_experiment(repetitions=5):
 
 
 def run_context_stress_matrix(repetitions=5):
+    """ 
+    测试 Prompt 压缩/治理逻辑在不同极端压力下的鲁棒性和压缩效率 
+    三维测试矩阵:
+    1. 历史深度 (history_levels)：模拟对话非常长的情况（4轮 vs 12轮 vs 24轮）。
+    2. 笔记密度 (note_levels)：模拟 Agent 记录了大量背景知识的情况（2条 vs 10条）。
+    3. 请求复杂度 (request_levels)：模拟用户指令的长短。
+    指标:
+    平均压缩比 (avg_compression_ratio)：在不同压力下的平均压缩比例
+    请求完整性保留率 (request_integrity_rate)：验证即使在极端压缩下 用户最新的那个指令是否依然完整保留在 Prompt 中
+    """
+
     repetitions = int(repetitions)
     history_levels = [("short", 4), ("medium", 12), ("long", 24)]
     note_levels = [("low", 2), ("high", 10)]
@@ -458,6 +488,7 @@ def run_context_stress_matrix(repetitions=5):
                             session_store=store,
                             approval_policy="auto",
                         )
+                        # 注入大量填充数据（Filler History/Notes）来人为制造“Token 爆炸”情况
                         for index in range(note_count):
                             agent.memory.append_note(
                                 f"matrix-note-{index}-" + ("A" * 180),
@@ -519,6 +550,21 @@ def run_context_stress_matrix(repetitions=5):
     }
 
 
+"""
+模拟各种潜在的恶意操作或边界情况
+验证 Agent 的安全防御机制（如沙箱隔离、权限控制）是否真的生效
+共计10个场景:
+1. 非唯一文本替换场景：尝试使用非唯一的文本替换目标文件中的文本。
+2. 缺少替换字段场景：尝试使用缺少的字段替换目标文件中的文本。
+3. 超时范围超出预定范围场景：尝试设置超时时间为超出预定范围的值。
+4. 空任务场景：尝试执行空任务。
+5. 路径逃逸场景：尝试读取外部文件。
+6. 软链接逃逸场景：尝试读取软链接指向的外部文件。
+7. 搜索逃逸场景：尝试搜索外部文件。
+8. 审批拒绝场景：尝试执行需要审批的操作。
+9. 只读模式场景：尝试写入文件。
+10. 重复调用场景：尝试重复调用工具。
+"""
 def _security_agent(workspace_root, approval_policy="auto", read_only=False):
     workspace = WorkspaceContext.build(workspace_root)
     store = SessionStore(workspace_root / ".pico" / "sessions")
@@ -530,48 +576,43 @@ def _security_agent(workspace_root, approval_policy="auto", read_only=False):
         read_only=read_only,
     )
 
-
 def _scenario_invalid_patch_nonunique(workspace_root):
+    """ 非唯一文本替换场景：尝试使用非唯一的文本替换目标文件中的文本 """
+    # 创建一个包含重复文本的文件
     (workspace_root / "sample.txt").write_text("beta\nbeta\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
     agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "beta", "new_text": "locked"})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_invalid_patch_missing_field(workspace_root):
+    """ 缺少替换字段场景：尝试使用缺少的字段替换目标文件中的文本 """
     (workspace_root / "sample.txt").write_text("beta\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
     agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "beta"})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_timeout_out_of_range(workspace_root):
+    """ 超时范围超出范围场景：尝试设置超时时间为超出范围的值 """
     agent = _security_agent(workspace_root)
     agent.run_tool("run_shell", {"command": "echo hi", "timeout": 121})
     return dict(agent._last_tool_result_metadata)
 
-
-def _scenario_empty_command(workspace_root):
-    agent = _security_agent(workspace_root)
-    agent.run_tool("run_shell", {"command": "", "timeout": 20})
-    return dict(agent._last_tool_result_metadata)
-
-
 def _scenario_empty_delegate_task(workspace_root):
+    """ 空任务场景：尝试执行空任务 """
     agent = _security_agent(workspace_root)
     agent.run_tool("delegate", {"task": "", "max_steps": 2})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_path_escape_read(workspace_root):
+    """ 路径逃逸场景：尝试读取外部文件 """   
     outside = workspace_root.parent / f"{workspace_root.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
     agent.run_tool("read_file", {"path": "../outside.txt"})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_symlink_escape(workspace_root):
+    """ 软链接逃逸场景：尝试读取符号链接指向的外部文件 """
     outside = workspace_root.parent / f"{workspace_root.name}-symlink-target.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (workspace_root / "linked.txt").symlink_to(outside)
@@ -579,26 +620,26 @@ def _scenario_symlink_escape(workspace_root):
     agent.run_tool("read_file", {"path": "linked.txt"})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_search_escape(workspace_root):
+    """ 搜索逃逸场景：尝试搜索外部文件 """
     agent = _security_agent(workspace_root)
     agent.run_tool("search", {"pattern": "abc", "path": "../outside"})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_approval_denied(workspace_root):
+    """ 审批拒绝场景：尝试执行需要审批的操作，导致执行失败。"""
     agent = _security_agent(workspace_root, approval_policy="never")
     agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_read_only_block(workspace_root):
+    """ 只读模式场景：尝试写入文件，导致写入失败。"""
     agent = _security_agent(workspace_root, read_only=True)
     agent.run_tool("write_file", {"path": "x.txt", "content": "nope"})
     return dict(agent._last_tool_result_metadata)
 
-
 def _scenario_repeated_call(workspace_root):
+    """ 重复调用场景：尝试重复调用工具，导致调用失败。"""
     (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
     args = {"path": "README.md", "start": 1, "end": 1}
@@ -607,7 +648,6 @@ def _scenario_repeated_call(workspace_root):
         agent.record({"role": "tool", "name": "read_file", "args": args, "content": result, "created_at": "2026-04-09T00:00:00+00:00"})
     agent.run_tool("read_file", args)
     return dict(agent._last_tool_result_metadata)
-
 
 SECURITY_SCENARIOS = [
     ("path_escape_read", _scenario_path_escape_read),
@@ -676,7 +716,6 @@ def _provider_summary_from_artifact(payload):
         "artifact_path": payload.get("_artifact_path", ""),
     }
 
-
 def _provider_profile(provider):
     if provider == "gpt":
         api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -689,17 +728,16 @@ def _provider_profile(provider):
             "base_url": os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1"),
             "api_key": api_key,
         }
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = os.environ.get("SILICONFLOW_API_KEY", "")
     if not api_key:
-        return {"provider": "claude", "status": "blocked", "reason": "ANTHROPIC_API_KEY missing"}
+        return {"provider": "deepseek", "status": "blocked", "reason": "SILICONFLOW_API_KEY missing"}
     return {
-        "provider": "claude",
+        "provider": "siliconflow",
         "status": "ready",
-        "model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
-        "base_url": os.environ.get("ANTHROPIC_API_BASE", "https://www.right.codes/claude/v1"),
+        "model": os.environ.get("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3.2"),
+        "base_url": os.environ.get("SILICONFLOW_API_BASE", "https://api.siliconflow.cn/v1"),
         "api_key": api_key,
     }
-
 
 def _make_provider_client(provider):
     profile = _provider_profile(provider)
@@ -714,7 +752,8 @@ def _make_provider_client(provider):
             temperature=0.0,
             timeout=timeout,
         )
-    return AnthropicCompatibleModelClient(
+
+    return SiliconflowModelClient(
         model=profile["model"],
         base_url=profile["base_url"],
         api_key=profile["api_key"],
@@ -722,20 +761,18 @@ def _make_provider_client(provider):
         timeout=timeout,
     )
 
-
 def _normalize_text(value):
     text = str(value).strip().lower()
     while text.endswith((".", "!", "?", "\"", "'")):
         text = text[:-1].strip()
     return text
 
-
 def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_new_tokens=64):
     benchmark_path = Path(benchmark_path)
     workspace_root = Path(workspace_root)
     artifact_root = Path(artifact_root)
     providers = []
-    for provider_name in ("gpt", "claude"):
+    for provider_name in ("gpt", "siliconflow"):
         profile = _provider_profile(provider_name)
         if profile["status"] != "ready":
             providers.append(profile)
@@ -753,7 +790,7 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
         else:
             def factory(task, workspace, profile=profile):
                 del task, workspace
-                return AnthropicCompatibleModelClient(
+                return SiliconflowModelClient(
                     model=profile["model"],
                     base_url=profile["base_url"],
                     api_key=profile["api_key"],
@@ -787,13 +824,12 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
             )
     return {"providers": providers}
 
-
 def _followup_trace_metrics(agent):
     trace_path = agent.run_store.trace_path(agent.current_task_state)
     events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    # 统计 read_file 工具被调用的次数
     repeated_reads = sum(1 for event in events if event.get("event") == "tool_executed" and event.get("name") == "read_file")
     return repeated_reads
-
 
 def _inject_memory_noise(agent, rounds=8):
     for index in range(int(rounds)):
@@ -830,7 +866,7 @@ def _build_real_agent(workspace_root, provider, approval_policy="auto", read_onl
         read_only=read_only,
     )
 
-
+# 对照实验一: 记忆管理
 def run_real_memory_experiment(provider="gpt", repetitions=1):
     repetitions = int(repetitions)
     provider = str(provider)
@@ -851,6 +887,7 @@ def run_real_memory_experiment(provider="gpt", repetitions=1):
                         agent.feature_flags["relevant_memory"] = False
                     elif variant == "memory_irrelevant":
                         _set_irrelevant_memory_for_task(agent)
+                    
                     _inject_memory_noise(agent)
                     _truncate_read_history(agent)
                     if task["category"] == "fact_lookup":
@@ -896,7 +933,7 @@ def run_real_memory_experiment(provider="gpt", repetitions=1):
         "rows": variants,
     }
 
-
+# 对照实验二: 上下文管理
 def run_real_context_experiment(provider="gpt", repetitions=1):
     repetitions = int(repetitions)
     provider = str(provider)
@@ -919,9 +956,11 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
                             (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
                             agent = _build_real_agent(workspace_root, provider)
                             for index in range(note_count):
+                                # 埋入关键信息 以此判断在压缩过程中信息是否被保留/删除 注意只有第一条笔记包含真正的关键信息 其余全是干扰信息
                                 note_text = f"target token is {token}" if index == 0 else f"decoy token is DECOY-{index}"
                                 agent.memory.append_note(note_text, tags=("token",), created_at=f"2026-04-09T10:{index:02d}:00+00:00")
                             for index in range(history_count):
+                                # 人为膨胀对话历史 制造 Token 压力
                                 agent.record(
                                     {
                                         "role": "user" if index % 2 == 0 else "assistant",
@@ -985,8 +1024,8 @@ REAL_SECURITY_SCENARIOS = [
     {"id": "empty_delegate_task", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"delegate","args":{"task":"","max_steps":2}}</tool>', "approval_policy": "auto", "read_only": False},
 ]
 
-
 def _setup_real_security_workspace(workspace_root, scenario_id):
+    """ 设置真实安全实验的文件系统环境 """
     (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
     if scenario_id == "path_escape_read":
         outside = workspace_root.parent / "outside.txt"
@@ -999,8 +1038,8 @@ def _setup_real_security_workspace(workspace_root, scenario_id):
         text = "beta\nbeta\n" if scenario_id == "patch_nonunique" else "beta\n"
         (workspace_root / "sample.txt").write_text(text, encoding="utf-8")
 
-
 def _security_result_row(scenario_id, provider, metadata):
+    """ 构建安全实验结果行数据 """
     row = dict(metadata)
     row["scenario_id"] = scenario_id
     row["provider"] = provider
@@ -1008,7 +1047,6 @@ def _security_result_row(scenario_id, provider, metadata):
     row.setdefault("tool_error_code", "")
     row.setdefault("security_event_type", "")
     return row
-
 
 def _run_real_repeated_call_scenario(provider):
     with tempfile.TemporaryDirectory(prefix="pico-real-security-repeat-") as temp_dir:
@@ -1020,7 +1058,7 @@ def _run_real_repeated_call_scenario(provider):
             agent.ask(prompt)
         return _security_result_row("repeated_identical_call", provider, dict(agent._last_tool_result_metadata))
 
-
+# 对照实验三: 安全管理
 def run_real_security_experiment_suite(provider="gpt", repetitions=1):
     repetitions = int(repetitions)
     provider = str(provider)
@@ -1060,7 +1098,6 @@ def run_real_security_experiment_suite(provider="gpt", repetitions=1):
         "rows": rows,
     }
 
-
 def collect_resume_metrics(
     benchmark_artifact_path,
     runs_root,
@@ -1072,18 +1109,19 @@ def collect_resume_metrics(
     experiment_mode="synthetic",
     real_provider="gpt",
 ):
-    benchmark = aggregate_benchmark_artifact(benchmark_artifact_path)
+    """ 收集实验结果指标 """
+    benchmark = aggregate_benckmark_artfifact(benchmark_artifact_path)
     runs = aggregate_run_artifacts(runs_root)
     experiment_mode = str(experiment_mode)
     real_provider = str(real_provider)
     if experiment_mode == "real":
-        memory_large = run_real_memory_experiment(provider=real_provider, repetitions=large_memory_repetitions)
+        memory_large = run_real_memory_experiment(real_provider, large_memory_repetitions)
         memory = {name: dict(values) for name, values in memory_large["variants"].items()}
-        context = run_real_context_experiment(provider=real_provider, repetitions=context_repetitions)
-        security = run_real_security_experiment_suite(provider=real_provider, repetitions=security_repetitions)
+        context = run_real_context_experiment(real_provider, context_repetitions)
+        security = run_real_security_experiment_suite(real_provider, security_repetitions)
         stress = {
             "full": {"prompt_chars": int(round(context["summary"].get("avg_full_prompt_chars", 0.0)))},
-            "no_context_reduction": {"prompt_chars": int(round(context["summary"].get("avg_raw_prompt_chars", 0.0)))},
+            "no_context_reduction": {"prompt_chars": int(round(context["summary"].get("avg_raw_prompt_chars", 0.0)))}
         }
     else:
         stress = build_stress_agent_metrics()
@@ -1091,21 +1129,23 @@ def collect_resume_metrics(
         memory_large = run_large_scale_memory_experiment(repetitions=large_memory_repetitions)
         context = run_context_stress_matrix(repetitions=context_repetitions)
         security = run_security_experiment_suite(repetitions=security_repetitions)
+
     provider_payload = {"providers": []}
     if provider_experiments:
         provider_payload = json.loads(Path(provider_experiments).read_text(encoding="utf-8"))
+
     return {
         "experiment_mode": experiment_mode,
         "real_provider": real_provider if experiment_mode == "real" else "",
         "facts": {
             "model_backend_count": 2,
-            "tool_count": 7,
+            "tool_count": 9,
             "run_artifact_count": 3,
         },
         "benchmark": benchmark,
         "runs": runs,
         "stress_ablation": stress,
-        "memory_experiment": memory,
+        "memory_base_experiment": memory,
         "memory_large_experiment": memory_large,
         "context_experiment": context,
         "security_experiment": security,
@@ -1120,21 +1160,21 @@ def collect_resume_metrics(
                 if experiment_mode == "real"
                 else f"In a synthetic long-context stress scenario, context reduction shrank prompt size from {stress['no_context_reduction']['prompt_chars']} to {stress['full']['prompt_chars']} chars."
             ),
-            f"In the memory dependency experiment, repeated follow-up reads dropped from {memory['memory_off']['repeated_reads']} to {memory['memory_on']['repeated_reads']}.",
+            f"In the base memory dependency experiment, repeated follow-up reads dropped from {memory['memory_off']['repeated_reads']} to {memory['memory_on']['repeated_reads']}.",
             f"In the large-scale memory experiment, repeated reads dropped from {memory_large['variants']['memory_off']['repeated_reads']} to {memory_large['variants']['memory_on']['repeated_reads']} across {memory_large['task_count']} tasks.",
         ],
     }
-
 
 def render_resume_metrics_markdown(metrics):
     benchmark = metrics["benchmark"]
     runs = metrics["runs"]
     stress = metrics["stress_ablation"]
-    memory = metrics["memory_experiment"]
+    memory = metrics["memory_base_experiment"]
     memory_large = metrics["memory_large_experiment"]
     context = metrics["context_experiment"]
     security = metrics["security_experiment"]
     provider_payload = metrics.get("provider_experiments", {})
+
     lines = [
         "# Pico Resume Metrics",
         "",
@@ -1173,7 +1213,6 @@ def render_resume_metrics_markdown(metrics):
                 lines.append(f"- {provider['provider']}: {provider['status']} ({provider.get('reason', 'unknown')})")
     lines.append("")
     return "\n".join(lines)
-
 
 def render_large_scale_experiment_report(metrics):
     benchmark = metrics["benchmark"]
@@ -1245,7 +1284,6 @@ def render_large_scale_experiment_report(metrics):
     )
     return "\n".join(lines)
 
-
 def _write_json_artifact(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1253,20 +1291,6 @@ def _write_json_artifact(path, payload):
     return payload
 
 
-class _RecoveryScenarioModelClient(FakeModelClient):
-    def __init__(self, required_fragments, success_answer):
-        super().__init__([])
-        self.required_fragments = [str(fragment).lower() for fragment in required_fragments]
-        self.success_answer = str(success_answer)
-
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        del max_new_tokens, kwargs
-        self.prompts.append(prompt)
-        self.last_completion_metadata = {}
-        prompt_lower = str(prompt).lower()
-        if all(fragment in prompt_lower for fragment in self.required_fragments):
-            return f"<final>{self.success_answer}</final>"
-        return "<final>missing recovery state.</final>"
 
 
 RECOVERY_ABLATION_TASKS = [
@@ -1333,6 +1357,22 @@ RECOVERY_ABLATION_TASKS = [
 ]
 
 
+class _RecoveryScenarioModelClient(FakeModelClient):
+    def __init__(self, required_fragments, success_answer):
+        super().__init__([])
+        self.required_fragments = [str(fragment).lower() for fragment in required_fragments]
+        self.success_answer = str(success_answer)
+
+    def complete(self, prompt, max_new_tokens, **kwargs):
+        del max_new_tokens, kwargs
+        self.prompts.append(prompt)
+        self.last_completion_metadata = {}
+        prompt_lower = str(prompt).lower()
+        if all(fragment in prompt_lower for fragment in self.required_fragments):
+            return f"<final>{self.success_answer}</final>"
+        return "<final>missing recovery state.</final>"
+
+
 def _build_recovery_agent(workspace_root, required_fragments):
     workspace = WorkspaceContext.build(workspace_root)
     store = SessionStore(workspace_root / ".pico" / "sessions")
@@ -1343,7 +1383,6 @@ def _build_recovery_agent(workspace_root, required_fragments):
         approval_policy="auto",
         max_steps=4,
     )
-
 
 def _apply_recovery_setup(agent, task, workspace_root):
     setup = task["setup"]
@@ -1379,7 +1418,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
             agent.session["checkpoints"]["items"]["ckpt_resume"]["key_files"] = [{"path": "sample.txt", "freshness": None}]
         agent.session_store.save(agent.session)
         return
-
+    
     if setup in {"partial_stale_single", "partial_stale_multi"}:
         agent.memory.set_file_summary("sample.txt", "sample.txt: cached benchmark summary")
         agent.memory.remember_file("sample.txt")
@@ -1418,7 +1457,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
         if setup == "partial_stale_multi":
             (workspace_root / "notes.txt").write_text("note-one\nnote-two-shifted\n", encoding="utf-8")
         return
-
+    
     if setup == "workspace_mismatch":
         agent.session["checkpoints"] = {
             "current_id": "ckpt_workspace",
@@ -1442,7 +1481,7 @@ def _apply_recovery_setup(agent, task, workspace_root):
         }
         agent.session_store.save(agent.session)
         return
-
+    
     if setup == "schema_mismatch":
         agent.session["checkpoints"] = {
             "current_id": "ckpt_schema",
@@ -1466,12 +1505,12 @@ def _apply_recovery_setup(agent, task, workspace_root):
         }
         agent.session_store.save(agent.session)
         return
-
+    
     if setup == "no_checkpoint":
         agent.session.pop("checkpoints", None)
         agent.session_store.save(agent.session)
         return
-
+    
     if setup in {"partial_success_shell", "partial_success_tool"}:
         blocker = "tool_partial_success" if setup == "partial_success_shell" else "tool_failed"
         next_step = "Inspect the diff before retry" if setup == "partial_success_shell" else "Retry after checking the workspace state"
@@ -1531,7 +1570,6 @@ def _run_recovery_task_variant(task, variant):
             "false_accept": invalid_resume and resume_status == "full-valid",
             "final_answer": final_answer,
         }
-
 
 def _recovery_variant_summary(rows):
     rows = list(rows)
