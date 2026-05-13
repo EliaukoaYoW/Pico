@@ -242,12 +242,13 @@ class _MemoryExperimentModelClient(FakeModelClient):
             return "<final>Done.</final>"
         # 核心测试阶段
         if self.phase == "question":
-            # print(f"DEBUG: agent_memory_enabled={getattr(self, 'agent_memory_enabled', 'unknown')}")
             prompt_lower = prompt.lower()
+            # print("DEBUG:",prompt_lower)
             # 检查 Prompt 中是否包含 Memory or Relevant Memory 并搜索预期事实是否在其中
             memory_view = ""
             if "memory:" in prompt_lower and "\n\nrelevant memory:" in prompt_lower:
                 memory_view = prompt_lower.split("memory:", 1)[1].split("\n\nrelevant memory:", 1)[0]
+                # print(memory_view)
             
             relevant_view = ""
             if "relevant memory:" in prompt_lower and "\n\ntranscript:" in prompt_lower:
@@ -268,7 +269,7 @@ class _MemoryExperimentModelClient(FakeModelClient):
 
 
 def _build_memory_experiment_agent(workspace_root, expected_fact, filename):
-    workspace = WorkspaceContext.build(workspace_root)
+    workspace = WorkspaceContext.build(workspace_root, repo_root_override=workspace_root)
     store = SessionStore(workspace_root / ".pico" / "sessions")
     return Pico(
         model_client = _MemoryExperimentModelClient(expected_fact, filename),
@@ -391,23 +392,27 @@ def _run_memory_task_variant(task, variant):
     with tempfile.TemporaryDirectory(prefix="pico-memory-large-") as temp_dir:
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
-        _write_memory_task_files(workspace_root, task)
-    agent = _build_memory_experiment_agent(workspace_root, task["fact"], task["filename"])
-    assert agent.ask(_bootstrap_prompt(task)) == "Done."
+        _write_memory_task_files(workspace_root, task)    
+        agent = _build_memory_experiment_agent(workspace_root, task["fact"], task["filename"])        
+        assert agent.ask(_bootstrap_prompt(task)) == "Done."
 
-    if variant == "memory_off":
-        agent.feature_flags["memory"] = False
-        agent.feature_flags["relevant_memory"] = False
-    elif variant == "memory_irrelevant":
-        _set_irrelevant_memory_for_task(agent)
+        agent.feature_flags["memory"] = True
+        agent.feature_flags["relevant_memory"] = True
+
+        if variant == "memory_off":
+            agent.feature_flags["memory"] = False
+            agent.feature_flags["relevant_memory"] = False
+        elif variant == "memory_irrelevant":
+            _set_irrelevant_memory_for_task(agent)
         
-    result = agent.ask(_followup_prompt(task))
-    task_state = agent.current_task_state
-    return {
-            "correct": result.strip().lower() == f"{task['fact']}.",
-            "tool_steps": int(task_state.tool_steps),
-            "attempts": int(task_state.attempts),
-            "repeated_reads": int(getattr(agent.model_client, "followup_reads", 0)),
+        result = agent.ask(_followup_prompt(task))
+        task_state = agent.current_task_state
+
+        return {
+                "correct": result.strip().lower() == f"{task['fact']}.",
+                "tool_steps": int(task_state.tool_steps),
+                "attempts": int(task_state.attempts),
+                "repeated_reads": int(getattr(agent.model_client, "followup_reads", 0)),
         }
 
 def run_large_scale_memory_experiment(repetitions=5):
@@ -1129,6 +1134,7 @@ def collect_resume_metrics(
         memory_large = run_large_scale_memory_experiment(repetitions=large_memory_repetitions)
         context = run_context_stress_matrix(repetitions=context_repetitions)
         security = run_security_experiment_suite(repetitions=security_repetitions)
+
 
     provider_payload = {"providers": []}
     if provider_experiments:
