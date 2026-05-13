@@ -277,7 +277,7 @@ class ContextManager:
         输出: 相关记忆 section 的 SectionRender
         用途: 当 Prompt 超预算时，根据压缩顺序压缩相关记忆 section 直至不超过 total_budget
         """
-        header = "Relevant Memory"
+        header = "Relevant Memory:"
         note_texts = [str(note.get("text", "")) for note in selected_notes if str(note.get("text", "")).strip()]
         raw_lines = [header] + [f"- {text}" for text in note_texts]
         raw = "\n".join(raw_lines) if note_texts else "\n".join([header, "- none"])
