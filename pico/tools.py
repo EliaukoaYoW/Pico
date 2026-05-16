@@ -287,7 +287,7 @@ def tool_delegate(agent, args):
         session_store = agent.session_store,
         run_store = agent.run_store,
         approval_policy = "never",
-        max_step = int(args.get("max_step", 3)),
+        max_steps = int(args.get("max_steps", 3)),
         max_new_tokens = agent.max_new_tokens,
         depth = agent.depth + 1,
         max_depth = agent.max_depth,

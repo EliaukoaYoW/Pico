@@ -459,7 +459,7 @@ class ContextManager:
         输出: 文件摘要（如果存在）
         """
         memory = getattr(self.agent, "memory", None)
-        if memory is not None or not hasattr(memory, "to_dict"):
+        if memory is None or not hasattr(memory, "to_dict"):
             return ""
         snapshot = memory.to_dict()
         summary = snapshot.get("file_summaries", {}).get(str(path), "")
